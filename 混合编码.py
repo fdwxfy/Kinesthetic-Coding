@@ -1,5 +1,6 @@
- #放大+dct+截取+回归+非均匀量化（DC量化）
- #用来预测位置信号
+#一方面放大+dct+截取+回归+非均匀量化；另一方面0值周围直接不传
+#用来预测力信号的高压缩率
+
 
 import copy
 import pandas as pd
@@ -15,7 +16,7 @@ length = 8              # 这里要调参
 a = 20                  # LDVLC的参数
 Inte = 1                # 截取的长度，不能超过length
 L = 5
-T = 10
+T = 1
 
 SNR_xyz = 0
 PSNR_xyz = 0
@@ -24,33 +25,34 @@ Compression_ratio_xyz = 0
 HSSIM_xyz = 0
 
 
-def data1_P_x():
+def data1_F_x():
     ori = pd.read_csv("Dynamic_interaction_25s_RecordedTOPSession_DB.csv")
-    ori = pd.DataFrame(ori, columns=['MP_x'])
+    ori = pd.DataFrame(ori, columns=['SF_x'])
     ori = np.array(ori.T)
     ori = ori[0]
     ori = list(ori)
     return ori
 
-def data1_P_y():
+def data1_F_y():
     ori = pd.read_csv("Dynamic_interaction_25s_RecordedTOPSession_DB.csv")
-    ori = pd.DataFrame(ori, columns=['MP_y'])
+    ori = pd.DataFrame(ori, columns=['SF_y'])
     ori = np.array(ori.T)
     ori = ori[0]
     ori = list(ori)
     return ori
 
-def data1_P_z():
+def data1_F_z():
     ori = pd.read_csv("Dynamic_interaction_25s_RecordedTOPSession_DB.csv")
-    ori = pd.DataFrame(ori, columns=['MP_z'])
+    ori = pd.DataFrame(ori, columns=['SF_z'])
     ori = np.array(ori.T)
     ori = ori[0]
     ori = list(ori)
     return ori
+
 
 ##########################################################
 
-def Cut_arr(arr):
+def Cut_arr(arr): #将序列切分为长度为25的序列段
     cut_arr = []
     for i in range(int(len(arr) / length)):
         cut_arr_ = []
@@ -60,7 +62,7 @@ def Cut_arr(arr):
     return cut_arr
 
 
-def DCT(arr):
+def DCT(arr): #对每组数据进行dct变换
     dct_arr = []
     dct_arr_ = []
     for i in range(len(arr)):
@@ -197,19 +199,23 @@ else:
         return chr(b)
 
 
-def AMP(arr):
+def AMP(arr, Mp):
+    output = []
     for i in range(len(arr)):
-        arr[i] = arr[i] * Mp
-        if arr[i] == 128:
-            arr[i] = 127
-        elif arr[i] == -128:
-            arr[i] = -127
-    return arr
+        value = arr[i] * Mp
+        if value == 32:
+            value = 31
+        elif value == -32:
+            value = -31
+        output.append(value)
+    return output
 
-def IAMP(arr):
+def IAMP(arr, Mp):
+    output = []
     for i in range(len(arr)):
-        arr[i] = arr[i] / Mp
-    return arr
+        value = arr[i] / Mp
+        output.append(value)
+    return output
 
 def Gradient(mj):
     angle = acos(1 / sqrt(1 + np.square(mj)))
@@ -218,29 +224,30 @@ def Gradient(mj):
 def Regress(ori):
     X_value = []
     X = []
-    Encoder = []
+    Encoder = []                # 编码器
     Encoder_X = []
     n = 0
     p = 0
     q = 0
-    k = 0.15
+    k = 0.15                    # 死区阈值
     angle_max = 0.00001
     temp = ori[0]
     t = 0
     for i in range(len(ori)):
-        if ((i+1) % L != 0): 
+        if ((i+1) % L != 0) and i != len(ori)-1: 
             X_value.append(ori[i])
-        elif ((i+1) % L == 0):
+        elif ((i+1) % L == 0) or i == len(ori)-1:
             X_value.append(ori[i])
             X.append(X_value)
             t += 1
             for j in range(len(X_value)):
                 if (i+1) == len(X_value) or t == T:
                     if j == 0:
-                        Encoder.append(quantizer(X_value[j]))
+                        Encoder.append(int(X_value[j]))
                         q += 1
                     if j == 1:
                         slope = (X_value[len(X_value)-1] - X_value[0]) / (len(X_value)-1)
+
                         Encoder.append(quantizer(slope))
                         q += 1
                     if j != 0 and j != 1:
@@ -259,7 +266,7 @@ def Regress(ori):
                         Encoder.append(quantizer(slope))
                         q += 1
                     if j != 0:                  
-                        difference = X_value[j] - (X_value[0] + slope * j)
+                        difference = X_value[j] - (temp + slope * j)
                         dead_zone = np.abs(difference / ((X_value[0] + slope * j) + 0.00001))
                         if dead_zone > k:
                             Encoder.append(quantizer(difference))
@@ -277,17 +284,19 @@ def Regress(ori):
     return Encoder_X, p, q
 
 def IRegress(Encoder_X):
-    Decoder = []
+    Decoder = []                # 解码器
     Decoder_X = []
     t = 0
     for i in range(len(Encoder_X)):
-        value = Encoder_X[i]
+        value = Encoder_X[i]          #
         t += 1
         for j in range(len(value)):
             if j == 0:    
+                slope = 0
                 if i == 0 or t == T:
-                    Decoder = I_quantizer(value[j])
-                    slope = I_quantizer(value[j+1])
+                    Decoder = (value[j])
+                    if len(value) >= 2:
+                        slope = I_quantizer(value[j+1])
                 else:
                     slope = I_quantizer(value[j])
                     Decoder = Decoder2 + slope
@@ -297,9 +306,7 @@ def IRegress(Encoder_X):
                 Decoder_X.append(Decoder2)
             elif(I_quantizer(value[j]) != a):
                 Decoder_X.append(Decoder + slope * (j - 1) + I_quantizer(value[j]))
-            elif(I_quantizer(value[j]) == a): 
                 Decoder_X.append(Decoder + slope * j)
-        if t == T:
             t = 0
     return Decoder_X
 
@@ -309,7 +316,7 @@ def Intercept(arr):
     for i in range(len(arr)):
         n += 1
         if n < (Inte+1):
-            in_arr.append(arr[i])
+            in_arr.append(arr[i]) #m为待定量化系数
         if n == length:
             n = 0
     return in_arr
@@ -320,13 +327,33 @@ def IIntercept(arr):
     for i in range(len(arr)):
         n += 1
         if n < Inte:
-            iin_arr.append(arr[i])
+            iin_arr.append(arr[i]) #m为待定量化系数
         if n == Inte:
             n = 0
             iin_arr.append(arr[i])
             for j in range(length-Inte):
                 iin_arr.append(0)
     return iin_arr
+
+def Split(arr):
+    sp_arr1 = []
+    sp_arr2 = []
+    for i in range(len(arr)):
+        if (i % 2 == 0):
+            sp_arr1.append(arr[i])
+        else:
+            sp_arr2.append(arr[i])
+    return sp_arr1, sp_arr2
+
+def ISplit(sp_arr1, sp_arr2):
+    isp_arr = []
+    for i in range(len(sp_arr1) + len(sp_arr2)):
+        value = (int)(i / 2)
+        if (i % 2 == 0):
+            isp_arr.append(sp_arr1[value])
+        else:
+            isp_arr.append(sp_arr2[value])
+    return isp_arr
 
 def dec2bin(d1_arr):
     bin_arr = []
@@ -347,7 +374,7 @@ def dec2bin11(x):
     return re
 
 def quantizer(x):
-    scaler = Max / 4096
+    scaler = Max / 4096  # 量化间隔
     pos = []
     if x > 0:
         pos.append(1)
@@ -437,46 +464,111 @@ def IQuantizer(q_arr):
 for w in range(3):
 
     if w == 0:
-        ori = data1_P_x()
+        ori = data1_F_x()
 
     if w == 1:
-        ori = data1_P_y()
+        ori = data1_F_y()
 
     if w == 2:
-        ori = data1_P_z()
+        ori = data1_F_z()
 
     #@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    #原始数据放大
+    Max1 = ori[0]
+    for i in range(len(ori)):
+        if abs(ori[i]) > Max1:
+            Max1 = abs(ori[i])
+    Mp = 32 / Max1
+    amp_arr = AMP(ori, Mp)
+    Max = 32
+    Encoder = []
+    b = 40
+    c = 60
+    m = 0
+    input = []
+    sum_p = 0
+    sum_q = 0
+    temp1 = []
+    #分割
+    cut_arr = Cut_arr(amp_arr)
+    for i in range(len(cut_arr)):
+        value = cut_arr[i]
+        if value[0] == 0 or i == len(cut_arr)-1:
+            if i == len(cut_arr)-1:
+                input.append(value)
+                m == 0
+            if m == 0 and i != 0:
+                if len(input) >= L:
+                    dct_arr = DCT(input)
+                    d1_arr = D2TD1(dct_arr)
+                    in_arr = Intercept(d1_arr)
+                    output, p, q = Regress(in_arr)
+                    Encoder.append(output)
+                    sum_p += p
+                    sum_q += q
+                    
+                else:
+                    temp1.append([c])
+                    temp2 = []
+                    for z in range(len(input)):
+                        input_temp = input[z]
+                        for l in range(len(input_temp)):
+                            temp2.append(quantizer(input_temp[l]))
+                        temp1.append(temp2)
+                        sum_q += len(input[z])
+                        temp2 = []
+                    Encoder.append(temp1)
+                    temp1 = []
+                    
+                input = []
+            Encoder.append([[b]])
+            m += 1
+        else:
+            input.append(value)
+            m = 0
 
-    cut_arr = Cut_arr(ori)
-    dct_arr = DCT(cut_arr)
-    d1_arr = D2TD1(dct_arr)
-    Max1 = d1_arr[0]
-    for i in range(len(d1_arr)):
-        if abs(d1_arr[i]) > Max1:
-            Max1 = abs(d1_arr[i])
-    Mp = 128 / Max1
-    amp_arr = AMP(d1_arr)
-    Max = 128
-    in_arr = Intercept(amp_arr)
-    Encoder_X, p, q = Regress(in_arr)
 
-    ####@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@解码
-    Decoder_X = IRegress(Encoder_X)
-    iin_arr = IIntercept(Decoder_X)
-    iamp_arr = IAMP(iin_arr)
-    p_arr = P_arr(iamp_arr)
-    idct_arr = IDCT(p_arr)
-    iamp_arr = D2TD1(idct_arr)
-    CR = len(ori * 64)/(p*64+q*8)
+    ######@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@解码
+    Decoder_X = []
+    value2 = []
+    for i in range(len(Encoder)):
+        value = Encoder[i]
+        value2 = value[0]
+        if value2[0] == b:
+            for j in range(length):
+                Decoder_X.append(0)
+        elif value2[0] == c:
+            for j in range(len(value)-1):
+                value3 = value[j+1]
+                for z in range(len(value3)):
+                     Decoder_X.append(I_quantizer(value3[z]))
+        else:
+            ##回归算法解码+反量化
+            output = IRegress(value)
+            #反截取
+            iin_arr = IIntercept(output)
+            #打包
+            p_arr = P_arr(iin_arr)
+            #IDCT变换
+            idct_arr = IDCT(p_arr)
+            for j in range(len(idct_arr)):
+                value3 = idct_arr[j]
+                for z in range(len(value3)):
+                    Decoder_X.append(value3[z])
+    Decoder_X = IAMP(Decoder_X, Mp)
+    
 
     #@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 
+    p = sum_p
+    q = sum_q
+    CR = len(ori * 64)/(p*64+q*8)
 
 
     # 计算mse和psnr
     def mse_psnr(pre, lab):
         s = 0
-        for i in range(len(pre)):
+        for i in range(min(len(pre), len(lab))):
             s += pow((lab[i] - pre[i]), 2)
         mse = s / (len(lab))
         psnr = 10 * math.log((36 / mse), 10)
@@ -485,19 +577,19 @@ for w in range(3):
     def snr(pre, lab):
         s_lab = 0
         s_err = 0
-        for i in range(len(pre)):
+        for i in range(min(len(pre), len(lab))):
             s_lab += pow(lab[i], 2)
             s_err += pow(lab[i] - pre[i], 2)
         snr =  10 * math.log(s_lab / s_err, 10)
         return snr
 
-    mse, psnr = mse_psnr(iamp_arr, ori)
+    mse, psnr = mse_psnr(Decoder_X, ori)
 
-    SNR = snr(iamp_arr, ori)
+    SNR = snr(Decoder_X, ori)
 
-    #################################
+
     def HSSIM2(arr1, arr2):
-        for i in range(len(arr1)):
+        for i in range(min(len(arr1), len(arr2))):
             arr1[i] = pow(arr1[i], 2) * 1.4
             arr2[i] = pow(arr2[i], 2) * 1.4
         arr1 = pd.Series(arr1)
@@ -515,10 +607,9 @@ for w in range(3):
         Sp = pow(l_ * C_, 8) 
         return Sp
 
-    arr1 = copy.deepcopy(iamp_arr)
+    arr1 = copy.deepcopy(Decoder_X)
     arr2 = copy.deepcopy(ori)
     Sp = HSSIM2(arr1, arr2)
-
 
     SNR_xyz += SNR
     PSNR_xyz += psnr
